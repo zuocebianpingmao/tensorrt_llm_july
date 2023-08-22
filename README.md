@@ -1,9 +1,9 @@
 # 总述
 
-请简练地概括项目的主要贡献，使读者可以快速理解并复现你的工作，包括：
 
-- 介绍本工作是 [NVIDIA TensorRT Hackathon 2023](https://github.com/NVIDIA/trt-samples-for-hackathon-cn/tree/master/Hackathon2023) 的参赛题目（请给出上述链接），并介绍具体选题是什么（参见“选题得分”小节，应为如下之一：1，2，3，4，2+4，3+4）
-    - 如果是优化新模型，原始模型的名称及链接，并对该模型做个简要介绍
+- 本工作是 [NVIDIA TensorRT Hackathon 2023](https://github.com/NVIDIA/trt-samples-for-hackathon-cn/tree/master/Hackathon2023) 的参赛题目，选题为：用TensorRT-LLM实现新模型；为TensorRT-LLM添加新feature，或者在模型上启用了现有feature
+    - 原始模型的名称：[starcoderbase-7b](https://huggingface.co/bigcode/starcoderbase-7b)
+    - StarCoderBase-7B 是一个参数量为7B的模型，使用来自The Stack (v1.2)的 80 多种编程语言进行训练，Stack (v1.2)是一个收集自GitHub的包含很多代码的数据集，该模型使用了Multi Query Attention机制，context长度为8192个tokens
 - 优化效果（例如给出精度和加速比），简单给出关键的数字即可，在这里不必详细展开
 - 在Docker里面代码编译、运行步骤的完整说明
   - 请做到只要逐行运行你给的命令，就能把代码跑起来
