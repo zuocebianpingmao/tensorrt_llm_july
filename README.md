@@ -2,8 +2,8 @@
 
 
 - 本工作是 [NVIDIA TensorRT Hackathon 2023](https://github.com/NVIDIA/trt-samples-for-hackathon-cn/tree/master/Hackathon2023) 的参赛题目，选题为：用TensorRT-LLM实现新模型；为TensorRT-LLM添加新feature，或者在模型上启用了现有feature
-    - 原始模型的名称：[starcoderbase-7b](https://huggingface.co/bigcode/starcoderbase-7b)
-    - StarCoderBase-7B 是一个参数量为7B的模型，使用来自The Stack (v1.2)的 80 多种编程语言进行训练，Stack (v1.2)是一个收集自GitHub的包含很多代码的数据集，该模型使用了Multi Query Attention机制，context长度为8192个tokens
+    - 原始模型的名称：[Qwen-7b-chat](https://huggingface.co/Qwen/Qwen-7b-chat)
+    - Qwen-7b-chat 是一个参数量为7B的模型，使用来自公开的超过2.2万亿tokens的数据进行训练，语言方面主要为中英文，和一般的模型区别如下：1.使用untied embedding嵌入；2.使用RoPE相对位置编码；3.使用RMSNorm替换LayerNorm；4.FFN激活函数SwiGLU代替ReLU；5.采用flash Attention。
 - 优化效果（例如给出精度和加速比），简单给出关键的数字即可，在这里不必详细展开
 - 在Docker里面代码编译、运行步骤的完整说明
   - 请做到只要逐行运行你给的命令，就能把代码跑起来
