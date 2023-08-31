@@ -113,18 +113,24 @@ int TritonFlashAttentionPlugin::enqueueImpl(const nvinfer1::PluginTensorDesc* in
     if (std::is_same<T, float>::value)
     {
         const int BLOCK_SIZE = 64;
-        res = fmha_d64_fp32(stream, (seqLen + BLOCK_SIZE - 1) / BLOCK_SIZE, batchSize * mNumHeads, 1,
-            reinterpret_cast<CUdeviceptr>(Out), reinterpret_cast<CUdeviceptr>(L), reinterpret_cast<CUdeviceptr>(M),
-            reinterpret_cast<CUdeviceptr>(Q), reinterpret_cast<CUdeviceptr>(K), reinterpret_cast<CUdeviceptr>(V),
-            mSoftmaxScale, seqLen);
+        // res = fmha_d64_fp32(stream, (seqLen + BLOCK_SIZE - 1) / BLOCK_SIZE, batchSize * mNumHeads, 1,
+        //     reinterpret_cast<CUdeviceptr>(Out), reinterpret_cast<CUdeviceptr>(L), reinterpret_cast<CUdeviceptr>(M),
+        //     reinterpret_cast<CUdeviceptr>(Q), reinterpret_cast<CUdeviceptr>(K), reinterpret_cast<CUdeviceptr>(V),
+        //     mSoftmaxScale, seqLen);
+        res = fmha_d64_fp32_default(stream, reinterpret_cast<CUdeviceptr>(Out), reinterpret_cast<CUdeviceptr>(L),
+            reinterpret_cast<CUdeviceptr>(M), reinterpret_cast<CUdeviceptr>(Q), reinterpret_cast<CUdeviceptr>(K),
+            reinterpret_cast<CUdeviceptr>(V), mSoftmaxScale, batchSize, mNumHeads, seqLen);
     }
     else
     {
         const int BLOCK_SIZE = 128;
-        res = fmha_d64_fp16(stream, (seqLen + BLOCK_SIZE - 1) / BLOCK_SIZE, batchSize * mNumHeads, 1,
-            reinterpret_cast<CUdeviceptr>(Out), reinterpret_cast<CUdeviceptr>(L), reinterpret_cast<CUdeviceptr>(M),
-            reinterpret_cast<CUdeviceptr>(Q), reinterpret_cast<CUdeviceptr>(K), reinterpret_cast<CUdeviceptr>(V),
-            mSoftmaxScale, seqLen);
+        // res = fmha_d64_fp16(stream, (seqLen + BLOCK_SIZE - 1) / BLOCK_SIZE, batchSize * mNumHeads, 1,
+        //     reinterpret_cast<CUdeviceptr>(Out), reinterpret_cast<CUdeviceptr>(L), reinterpret_cast<CUdeviceptr>(M),
+        //     reinterpret_cast<CUdeviceptr>(Q), reinterpret_cast<CUdeviceptr>(K), reinterpret_cast<CUdeviceptr>(V),
+        //     mSoftmaxScale, seqLen);
+        res = fmha_d64_fp16_default(stream, reinterpret_cast<CUdeviceptr>(Out), reinterpret_cast<CUdeviceptr>(L),
+            reinterpret_cast<CUdeviceptr>(M), reinterpret_cast<CUdeviceptr>(Q), reinterpret_cast<CUdeviceptr>(K),
+            reinterpret_cast<CUdeviceptr>(V), mSoftmaxScale, batchSize, mNumHeads, seqLen);
     }
     return res;
 }

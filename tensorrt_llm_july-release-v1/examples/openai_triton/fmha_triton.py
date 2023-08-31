@@ -19,7 +19,7 @@ def fused_attention_kernel(
     Out, L, M,  # outputs
     Q, K, V,
     sm_scale,
-    seq_len,
+    batch_size, num_heads, seq_len,
     BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -104,7 +104,8 @@ def fused_attention(q, k, v, sm_scale, o_buf=None, l_buf=None, m_buf=None):
     fused_attention_kernel[grid](
         o, L, m,
         q, k, v,
-        sm_scale, q.shape[2],
+        sm_scale,
+        q.shape[0], q.shape[1], q.shape[2],
         # tl.constexpr
         BLOCK_M=BLOCK,
         BLOCK_N=BLOCK,
