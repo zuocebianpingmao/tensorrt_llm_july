@@ -36,9 +36,9 @@ python triton/python/triton/tools/compile.py \
     -o aot/fp16/fmha_kernel_d64_fp16 \
     --out-name fmha_d64_fp16 \
     -w 4 \
+    -ns 1 \
     -s "*fp16:16, *fp32:16, *fp32:16, *fp16:16, *fp16:16, *fp16:16, fp32, i32, i32, i32, 128, 64, 128" \
-    --grid "1,640,1"
-    # -g "(seq_len + 127) / 128, batch_size * num_heads, 1"
+    -g "(seq_len + 127) / 128, batch_size * num_heads, 1"
 # Kernel for data type=float32, BLOCK_M=64, BLOCK_DMODEL=64, BLOCK_N=64
 mkdir -p aot/fp32
 python triton/python/triton/tools/compile.py \
@@ -47,9 +47,9 @@ python triton/python/triton/tools/compile.py \
     -o aot/fp32/fmha_kernel_d64_fp32 \
     --out-name fmha_d64_fp32 \
     -w 4 \
+    -ns 1 \
     -s "*fp32:16, *fp32:16, *fp32:16, *fp32:16, *fp32:16, *fp32:16, fp32, i32, i32, i32, 64, 64, 64" \
-    --grid "2,640,1"
-    # -g "(seq_len + 63) / 64, batch_size * num_heads, 1"
+    -g "(seq_len + 63) / 64, batch_size * num_heads, 1"
 # Link generated headers and create dispatchers.
 python triton/python/triton/tools/link.py aot/fp16/*.h -o aot/fmha_kernel_fp16
 python triton/python/triton/tools/link.py aot/fp32/*.h -o aot/fmha_kernel_fp32
