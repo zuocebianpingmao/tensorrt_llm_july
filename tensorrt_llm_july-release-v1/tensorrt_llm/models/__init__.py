@@ -7,6 +7,7 @@ from .gptneox.model import GPTNeoXForCausalLM, GPTNeoXModel
 from .llama.model import LLaMAForCausalLM, LLaMAModel
 from .opt.model import OPTLMHeadModel, OPTModel
 from .quantized.quant import smooth_quantize, weight_only_quantize
+from .qwen.model import QwenForCausalLM, QwenModel
 
 __all__ = [
     'BertModel',
@@ -27,4 +28,6 @@ __all__ = [
     'weight_only_quantize',
     'ChatGLM6BHeadModel',
     'ChatGLM6BModel',
+    'QwenForCausalLM',
+    'QwenModel'
 ]
