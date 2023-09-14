@@ -45,6 +45,15 @@ class QwenDecoderLayer(Module):
             multi_query_mode=multi_query_mode,
             tp_group=tp_group,
             tp_size=tp_size)
+        
+        # set dense layer bias=False
+        self.attention.dense = RowLinear(hidden_size,
+                                         hidden_size,
+                                         bias=False,
+                                         dtype=dtype,
+                                         tp_group=tp_group,
+                                         tp_size=tp_size)
+
         if not mlp_hidden_size:
             mlp_hidden_size = hidden_size * 4
         self.mlp = GatedMLP(hidden_size=hidden_size,
