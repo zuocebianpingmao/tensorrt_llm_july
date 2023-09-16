@@ -3,10 +3,9 @@ import os
 import time
 from pathlib import Path
 
+import tensorrt_llm
 import torch
 import torch.multiprocessing as mp
-
-import tensorrt_llm
 from tensorrt_llm._utils import str_dtype_to_trt
 from tensorrt_llm.builder import Builder
 from tensorrt_llm.layers import PositionEmbeddingType
@@ -65,13 +64,13 @@ def parse_arguments():
     parser.add_argument('--n_head', type=int, default=32)
     parser.add_argument('--hidden_act', type=str, default='silu')
     # parser.add_argument('--rotary_dim', type=int, default=128)
-    # parser.add_argument(
-    #     '--rotary_pct',
-    #     type=float,
-    #     default=0.0,
-    #     help="Setting this to a value > 0.0 (and <= 1.0) activates RoPE.")
+    parser.add_argument(
+        '--rotary_pct',
+        type=float,
+        default=1.0,
+        help="Setting this to a value > 0.0 (and <= 1.0) activates RoPE.")
     parser.add_argument('--inter_size', type=int, default=None)
-    # parser.add_argument('--no_bias', action="store_false")
+    parser.add_argument('--no_bias', action="store_false")
     parser.add_argument('--max_batch_size', type=int, default=1)
     parser.add_argument('--max_input_len', type=int, default=1024)
     parser.add_argument('--max_output_len', type=int, default=1024)
@@ -110,23 +109,23 @@ def parse_arguments():
     parser.add_argument('--remove_input_padding',
                         default=False,
                         action='store_true')
-    # parser.add_argument(
-    #     "--multi_query_mode",
-    #     "-mq",
-    #     default=False,
-    #     action='store_true',
-    #     help=
-    #     "Whether this model uses multi-query attention mechanism (default: False)"
-    # )
+    parser.add_argument(
+        "--multi_query_mode",
+        "-mq",
+        default=False,
+        action='store_true',
+        help=
+        "Whether this model uses multi-query attention mechanism (default: False)"
+    )
     # Arguments related to the quantization of the model.
-    # parser.add_argument(
-    #     '--use_smooth_quant',
-    #     default=False,
-    #     action="store_true",
-    #     help=
-    #     'Use the SmoothQuant method to quantize activations and weights for the various GEMMs.'
-    #     'See --per_channel and --per_token for finer-grained quantization options.'
-    # )
+    parser.add_argument(
+        '--use_smooth_quant',
+        default=False,
+        action="store_true",
+        help=
+        'Use the SmoothQuant method to quantize activations and weights for the various GEMMs.'
+        'See --per_channel and --per_token for finer-grained quantization options.'
+    )
     parser.add_argument(
         '--use_weight_only',
         default=False,
@@ -144,29 +143,29 @@ def parse_arguments():
         'Define the precision for the weights when using weight-only quantization.'
         'You must also use --use_weight_only for that argument to have an impact.'
     )
-    # parser.add_argument(
-    #     '--per_channel',
-    #     default=False,
-    #     action="store_true",
-    #     help=
-    #     'By default, we use a single static scaling factor for the GEMM\'s result. '
-    #     'per_channel instead uses a different static scaling factor for each channel. '
-    #     'The latter is usually more accurate, but a little slower.')
-    # parser.add_argument(
-    #     '--per_token',
-    #     default=False,
-    #     action="store_true",
-    #     help=
-    #     'By default, we use a single static scaling factor to scale activations in the int8 range. '
-    #     'per_token chooses at run time, and for each token, a custom scaling factor. '
-    #     'The latter is usually more accurate, but a little slower.')
-    # parser.add_argument(
-    #     '--int8_kv_cache',
-    #     default=False,
-    #     action="store_true",
-    #     help=
-    #     'By default, we use dtype for KV cache. int8_kv_cache chooses int8 quantization for KV'
-    # )
+    parser.add_argument(
+        '--per_channel',
+        default=False,
+        action="store_true",
+        help=
+        'By default, we use a single static scaling factor for the GEMM\'s result. '
+        'per_channel instead uses a different static scaling factor for each channel. '
+        'The latter is usually more accurate, but a little slower.')
+    parser.add_argument(
+        '--per_token',
+        default=False,
+        action="store_true",
+        help=
+        'By default, we use a single static scaling factor to scale activations in the int8 range. '
+        'per_token chooses at run time, and for each token, a custom scaling factor. '
+        'The latter is usually more accurate, but a little slower.')
+    parser.add_argument(
+        '--int8_kv_cache',
+        default=False,
+        action="store_true",
+        help=
+        'By default, we use dtype for KV cache. int8_kv_cache chooses int8 quantization for KV'
+    )
     parser.add_argument(
         '--random_seed',
         type=int,
@@ -175,48 +174,49 @@ def parse_arguments():
         'Seed to use when initializing the random number generator for torch.')
 
     args = parser.parse_args()
-    # assert not (
-    #     args.use_smooth_quant and args.use_weight_only
-    # ), "You cannot enable both SmoothQuant and INT8 weight-only together."
+    assert not (
+        args.use_smooth_quant and args.use_weight_only
+    ), "You cannot enable both SmoothQuant and INT8 weight-only together."
 
-    # if args.use_smooth_quant:
-    #     args.quant_mode = QuantMode.use_smooth_quant(args.per_token,
-    #                                                  args.per_channel)
+    if args.use_smooth_quant:
+        args.quant_mode = QuantMode.use_smooth_quant(args.per_token,
+                                                     args.per_channel)
     if args.use_weight_only:
         args.quant_mode = QuantMode.use_weight_only(
             args.weight_only_precision == 'int4')
     else:
         args.quant_mode = QuantMode(0)
-    # args.bias = not args.no_bias
+    args.bias = not args.no_bias
 
     if args.inter_size is None:
         args.inter_size = 4 * args.n_embd
 
-    # if args.int8_kv_cache:
-    #     assert (
-    #         args.use_gpt_attention_plugin
-    #     ), "You have to use GPT attention plugin when int8 KV cache is set"
-    #     args.quant_mode = args.quant_mode.set_int8_kv_cache()
+    if args.int8_kv_cache:
+        assert (
+            args.use_gpt_attention_plugin
+        ), "You have to use GPT attention plugin when int8 KV cache is set"
+        args.quant_mode = args.quant_mode.set_int8_kv_cache()
 
     if args.model_dir is not None:
-        n_embd, n_head, n_layer, n_positions, vocab_size, _, hidden_act, rotary_pct, bias, inter_size, multi_query_mode = parse_ft_config(
+        n_embd, n_head, n_layer, n_positions, kv_channel, vocab_size, _, hidden_act, rotary_pct, bias, inter_size, multi_query_mode = parse_ft_config(
             Path(args.model_dir) / "config.ini")
         args.n_embd = n_embd
         args.n_head = n_head
         args.n_layer = n_layer
         args.n_positions = n_positions
+        args.kv_channel = kv_channel
         args.vocab_size = vocab_size
         args.hidden_act = hidden_act
-        # args.rotary_pct = rotary_pct
-        # args.bias = bias
+        args.rotary_pct = rotary_pct
+        args.bias = bias
         args.inter_size = inter_size
-        # args.multi_query_mode = multi_query_mode
+        args.multi_query_mode = multi_query_mode
     return args
 
 
 def build_rank_engine(builder: Builder,
                       builder_config: tensorrt_llm.builder.BuilderConfig,
-                      engine_name, rank, multi_query_mode, args):
+                      engine_name, rank, args):
     '''
        @brief: Build the engine on the given rank.
        @param rank: The rank to build the engine.
@@ -234,19 +234,23 @@ def build_rank_engine(builder: Builder,
         hidden_act=args.hidden_act,
         max_position_embeddings=args.n_positions,
         # rotary_dim=args.rotary_dim,
+        position_embedding_type=PositionEmbeddingType.learned_absolute
+        if args.rotary_pct == 0.0 else PositionEmbeddingType.rope,
+        rotary_embedding_percentage=args.rotary_pct,
         mlp_hidden_size=args.inter_size,
-        neox_rotary_style=True,
-        multi_query_mode=multi_query_mode,
+        # neox_rotary_style=True,
         dtype=kv_dtype,
         tensor_parallel=args.world_size,  # TP only
         tensor_parallel_group=list(range(args.world_size)),  
-        # apply_query_key_layer_scaling=builder_config.
-        # apply_query_key_layer_scaling,
-        # quant_mode=args.quant_mode,
-        # bias=args.bias,
-        # multi_query_mode=args.multi_query_mode
-        )
-    if args.use_weight_only and args.weight_only_precision == 'int8':
+        apply_query_key_layer_scaling=builder_config.
+        apply_query_key_layer_scaling,
+        quant_mode=args.quant_mode,
+        bias=args.bias,
+        multi_query_mode=args.multi_query_mode)
+    if args.use_smooth_quant:
+        tensorrt_llm_ChatGLM6BModel = smooth_quantize(
+            tensorrt_llm_ChatGLM6BModel, args.quant_mode)
+    elif args.use_weight_only and args.weight_only_precision == 'int8':
         tensorrt_llm_qwen = weight_only_quantize(tensorrt_llm_qwen,
                                                   QuantMode.use_weight_only())
     elif args.use_weight_only and args.weight_only_precision == 'int4':
@@ -259,8 +263,7 @@ def build_rank_engine(builder: Builder,
                      args.model_dir,
                      rank,
                      args.world_size,
-                     fp16=args.dtype,
-                     multi_query_mode=multi_query_mode)
+                     fp16=args.dtype)
 
     # Module -> Network
     network = builder.create_network()
@@ -270,11 +273,6 @@ def build_rank_engine(builder: Builder,
             dtype=args.use_gpt_attention_plugin)
     if args.use_gemm_plugin:
         network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)
-    if args.use_weight_only:
-        network.plugin_config.set_weight_only_quant_matmul_plugin(
-            dtype='float16')
-    if args.world_size > 1:
-        network.plugin_config.set_nccl_plugin(args.dtype)
     if args.remove_input_padding:
         network.plugin_config.enable_remove_input_padding()
     assert not (args.enable_context_fmha and args.enable_context_fmha_fp32_acc)
@@ -284,22 +282,22 @@ def build_rank_engine(builder: Builder,
         network.plugin_config.set_context_fmha(
             ContextFMHAType.enabled_with_fp32_acc)
 
-    # # Quantization plugins.
-    # if args.use_smooth_quant:
-    #     network.plugin_config.set_smooth_quant_gemm_plugin(dtype=args.dtype)
-    #     network.plugin_config.set_layernorm_quantization_plugin(
-    #         dtype=args.dtype)
-    #     # FIXME(nkorobov)
-    #     # See https://nvbugs/4164762
-    #     # See https://nvbugs/4174113
-    #     network.plugin_config.set_quantize_tensor_plugin()
-    #     network.plugin_config.set_quantize_per_token_plugin()
-    # elif args.use_weight_only:
-    #     network.plugin_config.set_weight_only_quant_matmul_plugin(
-    #         dtype='float16')
+    # Quantization plugins.
+    if args.use_smooth_quant:
+        network.plugin_config.set_smooth_quant_gemm_plugin(dtype=args.dtype)
+        network.plugin_config.set_layernorm_quantization_plugin(
+            dtype=args.dtype)
+        # FIXME(nkorobov)
+        # See https://nvbugs/4164762
+        # See https://nvbugs/4174113
+        network.plugin_config.set_quantize_tensor_plugin()
+        network.plugin_config.set_quantize_per_token_plugin()
+    elif args.use_weight_only:
+        network.plugin_config.set_weight_only_quant_matmul_plugin(
+            dtype='float16')
 
-    # if args.world_size > 1:
-    #     network.plugin_config.set_nccl_plugin(args.dtype)
+    if args.world_size > 1:
+        network.plugin_config.set_nccl_plugin(args.dtype)
     with net_guard(network):
         # Prepare
         network.set_named_parameters(
@@ -337,7 +335,7 @@ def build(rank, args):
 
     # when doing serializing build, all ranks share one engine
     # apply_query_key_layer_scaling = False
-    multi_query_mode = False
+    apply_query_key_layer_scaling = False
     builder = Builder()
 
     cache = None
@@ -357,18 +355,19 @@ def build(rank, args):
             vocab_size=args.vocab_size,
             hidden_act=args.hidden_act,
             max_position_embeddings=args.n_positions,
-            # apply_query_key_layer_scaling=apply_query_key_layer_scaling,
+            apply_query_key_layer_scaling=apply_query_key_layer_scaling,
             max_batch_size=args.max_batch_size,
             max_input_len=args.max_input_len,
             max_output_len=args.max_output_len,
-            int8=args.quant_mode.has_act_and_weight_quant(),
+            int8=(args.quant_mode.has_act_and_weight_quant()
+                  or args.quant_mode.has_int8_kv_cache()),
             opt_level=args.builder_opt,
-            multi_query_mode=multi_query_mode)
+            multi_query_mode=args.multi_query_mode)
 
         engine_name = get_engine_name(MODEL_NAME, args.dtype, args.world_size,
                                       cur_rank)
         engine = build_rank_engine(builder, builder_config, engine_name,
-                                   cur_rank, multi_query_mode, args)
+                                   cur_rank, args)
         assert engine is not None, f'Failed to build engine for rank {cur_rank}'
 
         if cur_rank == 0:

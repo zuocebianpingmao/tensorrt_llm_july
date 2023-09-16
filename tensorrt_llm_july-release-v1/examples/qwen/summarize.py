@@ -4,14 +4,12 @@ import json
 import os
 
 import numpy as np
-import torch
-from datasets import load_dataset, load_metric
-from transformers import AutoModelForCausalLM, AutoTokenizer
-# from transformers.generation import GenerationConfig
-
 import tensorrt_llm
 import tensorrt_llm.profiler as profiler
+import torch
+from datasets import load_dataset, load_metric
 from tensorrt_llm.logger import logger
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from build import get_engine_name  # isort:skip
 
@@ -72,9 +70,7 @@ def main(args):
     test_trt_llm = args.test_trt_llm
     hf_model_location = args.hf_model_location
     profiler.start('load tokenizer')
-    # tokenizer = LlamaTokenizer.from_pretrained(hf_model_location,
-    #                                            legacy=False,
-    #                                            padding_side='left')
+
     tokenizer = AutoTokenizer.from_pretrained(hf_model_location,
                                               padding_side='left',
                                               trust_remote_code=True,
@@ -83,7 +79,6 @@ def main(args):
     tensorrt_llm.logger.info(
         f'Load tokenizer takes: {profiler.elapsed_time_in_sec("load tokenizer")} sec'
     )
-    # tokenizer.pad_token = tokenizer.eos_token
 
     dataset_cnn = load_dataset("ccdv/cnn_dailymail",
                                '3.0.0',
@@ -101,8 +96,6 @@ def main(args):
     temperature = 1
     num_beams = args.num_beams
 
-    # pad_id = tokenizer.encode(tokenizer.pad_token, add_special_tokens=False)[0]
-    # end_id = tokenizer.encode(tokenizer.eos_token, add_special_tokens=False)[0]
     end_id = 151643
     pad_id = 151643
 
@@ -122,9 +115,6 @@ def main(args):
         tensorrt_llm.logger.info(
             f'Load HF model takes: {profiler.elapsed_time_in_sec("load HF model")} sec'
         )
-        # model.cuda()
-        # if args.data_type == 'fp16':
-        #     model.half()
 
     def summarize_tensorrt_llm(datapoint):
         batch_size = len(datapoint['article'])
