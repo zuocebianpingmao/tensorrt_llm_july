@@ -3,10 +3,9 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
-
 import tensorrt_llm
-from tensorrt_llm.functional import is_gated_activation, non_gated_version
+import torch
+from tensorrt_llm.functional import non_gated_version
 from tensorrt_llm.models import QwenForCausalLM
 from tensorrt_llm.quantization import QuantMode
 
@@ -47,6 +46,7 @@ def parse_ft_config(ini_file):
     n_head = qwen_config.getint('qwen', 'num_attention_heads')
     n_layer = qwen_config.getint('qwen', 'num_hidden_layers')
     n_positions = qwen_config.getint('qwen', 'seq_length')
+    kv_channel = qwen_config.getint('qwen', 'kv_channels')
     vocab_size = qwen_config.getint('qwen', 'vocab_size')
     do_layer_norm_before = qwen_config.getboolean('qwen', 'do_layer_norm_before', fallback=True)
     rotary_pct = qwen_config.getfloat('qwen', 'rotary_pct', fallback=0.0)
@@ -58,7 +58,7 @@ def parse_ft_config(ini_file):
         inter_size = 4 * n_embd
 
     multi_query_mode = qwen_config.getboolean('qwen', 'multi_query_mode', fallback=False)
-    return n_embd, n_head, n_layer, n_positions, vocab_size, do_layer_norm_before, hidden_act, rotary_pct, bias, inter_size, multi_query_mode
+    return n_embd, n_head, n_layer, n_positions, kv_channel, vocab_size, do_layer_norm_before, hidden_act, rotary_pct, bias, inter_size, multi_query_mode
 
 
 def load_from_ft(tensorrt_llm_qwen: QwenForCausalLM,
@@ -77,7 +77,7 @@ def load_from_ft(tensorrt_llm_qwen: QwenForCausalLM,
         plugin_weight_only_quant_type = torch.quint4x2
     use_weight_only = quant_mode.is_weight_only()
 
-    n_embd, n_head, n_layer, n_positions, vocab_size, do_layer_norm_before, hidden_act, rotary_pct, bias, inter_size, multi_query_mode = parse_ft_config(
+    n_embd, n_head, n_layer, n_positions, kv_channel, vocab_size, do_layer_norm_before, hidden_act, rotary_pct, bias, inter_size, multi_query_mode = parse_ft_config(
         Path(dir_path) / 'config.ini')
     np_dtype = np.float16 if fp16 == 'float16' else np.float32
 
@@ -147,6 +147,13 @@ def load_from_ft(tensorrt_llm_qwen: QwenForCausalLM,
     # The type of weights.
     w_type = np_dtype if not use_smooth_quant else np.int8
 
+    tensorrt_llm_qwen.position_embedding_cos.weight.value = (fromfile(
+        dir_path, 'model.cosTable.weight.bin',
+        [n_positions, kv_channel]))
+    tensorrt_llm_qwen.position_embedding_sin.weight.value = (fromfile(
+        dir_path, 'model.sinTable.weight.bin',
+        [n_positions, kv_channel]))
+
     tensorrt_llm_qwen.embedding.weight.value = (fromfile(
         dir_path, 'model.wte.bin', [vocab_size, n_embd]))
     if do_layer_norm_before:
@@ -200,7 +207,7 @@ def load_from_ft(tensorrt_llm_qwen: QwenForCausalLM,
                 scales.value = torch_weight_scales.numpy()
             else:
                 dst.value = np.ascontiguousarray(t)
-        # if bias:
+        
         t = fromfile(
             dir_path, 'model.layers.' + str(i) +
             '.attention.query_key_value.bias.' + str(rank) + '.bin')

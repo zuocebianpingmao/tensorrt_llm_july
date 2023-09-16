@@ -7,17 +7,15 @@ import dataclasses
 import os
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.multiprocessing as multiprocessing
-from smoothquant import capture_activation_range, smooth_gemm
-from tqdm import tqdm
-from transformers import AutoModelForCausalLM
-from transformers import AutoTokenizer
-
+from convert import split_and_save_weight, str_to_np_dtype
 from model_utils.modeling_qwen import QWenBlock
-from convert import split_and_save_weight
-
+from smoothquant import capture_activation_range, smooth_gemm
 from tensorrt_llm._utils import str_dtype_to_torch, torch_to_numpy
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,7 +91,7 @@ class ProgArgs:
 
 
 @torch.no_grad()
-def smooth_qwen_model(model, scales, alpha):
+def smooth_gpt_model(model, scales, alpha):
     # Smooth the activation and weights with smoother = $\diag{s}$
     for name, module in model.named_modules():
         if not isinstance(module, QWenBlock):
@@ -166,7 +164,7 @@ def hf_qwen_converter(args: ProgArgs):
         act_range = capture_activation_range(
             model, AutoTokenizer.from_pretrained(args.in_file), dataset)
         if args.smoothquant is not None:
-            smooth_qwen_model(model, act_range, args.smoothquant)
+            smooth_gpt_model(model, act_range, args.smoothquant)
 
     config = configparser.ConfigParser()
     config["qwen"] = {}
@@ -179,7 +177,26 @@ def hf_qwen_converter(args: ProgArgs):
     with open(saved_dir / "config.ini", 'w') as configfile:
         config.write(configfile)
 
-    storage_type = str_dtype_to_torch(args.storage_type)
+    if args.storage_type == 'float16':
+        type_mode = 'fp16'
+    if args.storage_type == 'float32':
+        type_mode = 'fp32'
+    storage_type = str_to_np_dtype(type_mode)
+
+    # add weight of position embedding
+    nMaxSL = 2048
+    inv_freq = 10**(-1 / 32 * np.arange(0, 128, 2, dtype=np.float32))
+    valueTable = np.matmul(
+        np.arange(nMaxSL, dtype=np.float32).reshape(-1, 1),
+        np.concatenate([inv_freq, inv_freq],
+                       axis=0).reshape(1, -1)).reshape(nMaxSL,
+                                                       len(inv_freq) * 2)
+    np.cos(valueTable).astype(storage_type).tofile(saved_dir /
+                                                   "model.cosTable.weight.bin")
+    np.sin(valueTable).astype(storage_type).tofile(saved_dir /
+                                                   "model.sinTable.weight.bin")
+    print("Save model.cosTable.weight.bin")
+    print("Save model.sinTable.weight.bin")
 
     global_ft_weights = [
         "model.wte", "model.final_layernorm.weight", 
@@ -187,11 +204,18 @@ def hf_qwen_converter(args: ProgArgs):
     ]
 
 
-    int8_outputs = None
+    # int8_outputs = None
+    # if args.calibrate_kv_cache:
+    #     int8_outputs = "kv_cache_only"
+    # if args.smoothquant is not None:
+    #     int8_outputs = "all"
+
     if args.calibrate_kv_cache:
-        int8_outputs = "kv_cache_only"
+        pass
     if args.smoothquant is not None:
-        int8_outputs = "all"
+        pass
+
+    storage_type = str_dtype_to_torch(args.storage_type)
 
     starmap_args = []
     for name, param in model.named_parameters():

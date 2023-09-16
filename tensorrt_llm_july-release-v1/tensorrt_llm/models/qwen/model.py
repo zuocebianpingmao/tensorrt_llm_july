@@ -1,50 +1,262 @@
+import math
 from collections import OrderedDict
 
+import numpy as np
 import tensorrt as trt
 
 from ..._common import default_net
 from ..._utils import pad_vocab_size, str_dtype_to_trt
-from ...functional import (RaggedTensor, Tensor, assertion, expand_mask,
+from ...functional import (RaggedTensor, Tensor, assertion, concat, constant,
                            gather_last_token_logits, gpt_attention,
-                           inflight_batching_gpt_attention, shape)
-from ...layers import (GatedMLP, Attention, AttentionMaskType, ColumnLinear, Embedding,
-                       InflightBatchingParam, RmsNorm, RowLinear, PositionEmbeddingType)
+                           shape, split)
+from ...layers import (GatedMLP, AttentionMaskType, ColumnLinear, Embedding,
+                       RmsNorm, RowLinear, PositionEmbeddingType)
 from ...module import Module, ModuleList
 from ...parameter import Parameter
 from ...quantization import FP8MLP, FP8Linear, FP8RowLinear, QuantMode
 
 
-class QwenDecoderLayer(Module):
+class Qwenttention(Module):
 
     def __init__(self,
-                 layer_id,
                  hidden_size,
                  num_attention_heads,
                  max_position_embeddings,
+                 num_layers=1,
+                 apply_query_key_layer_scaling=False,
+                 attention_mask_type=AttentionMaskType.bidirectional,
+                 bias=True,
                  dtype=None,
+                 position_embedding_type=PositionEmbeddingType.learned_absolute,
+                 neox_rotary_style=False,
+                 use_int8_kv_cache=False,
+                 rotary_embedding_percentage=1.0,
+                 tp_group=None,
+                 tp_size=1,
+                 multi_block_mode=False,
+                 multi_query_mode=False):
+        super().__init__()
+
+        self.attention_mask_type = attention_mask_type
+        self.attention_head_size = hidden_size // num_attention_heads
+        self.num_attention_heads = num_attention_heads // tp_size
+        self.num_attention_kv_heads = 1 if multi_query_mode else self.num_attention_heads
+        self.hidden_size = hidden_size // tp_size
+        self.max_position_embeddings = max_position_embeddings
+
+        self.num_layers = num_layers
+        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
+        self.norm_factor = math.sqrt(self.attention_head_size)
+        self.q_scaling = 1
+        if self.apply_query_key_layer_scaling:
+            self.norm_factor *= self.num_layers
+            self.q_scaling *= self.num_layers
+
+        self.position_embedding_type = position_embedding_type
+        self.multi_block_mode = multi_block_mode
+        self.multi_query_mode = multi_query_mode
+
+        self.rotary_embedding_dim = 0
+        self.neox_rotary_style = neox_rotary_style
+        if self.position_embedding_type == PositionEmbeddingType.rope:
+            self.rotary_embedding_dim = int(self.attention_head_size *
+                                            rotary_embedding_percentage)
+            # TODO: Once we add RotaryEmbedding outside GPTAttention plugin,
+            #       we need to set it up here
+
+        self.dtype = dtype
+
+        self.use_int8_kv_cache = use_int8_kv_cache
+        if self.use_int8_kv_cache:
+            self.kv_orig_quant_scale = Parameter(shape=(1, ), dtype='float32')
+            self.kv_quant_orig_scale = Parameter(shape=(1, ), dtype='float32')
+        else:
+            self.register_parameter('kv_orig_quant_scale', None)
+            self.register_parameter('kv_quant_orig_scale', None)
+
+        # Note: in multi_query_mode, only query heads are split between multiple GPUs,
+        # while key/value head are not split as there is only one head per key/value.
+        # The output feature size is therefore (h/tp + 2) * d, where h is num_heads,
+        # d is head_size, and tp is tensor_parallel_size.
+        # In ColumnLinear op, the output dim is calculated by (h + 2*tp) * d / tp,
+        # which matches the desired output size (h/tp + 2) * d after splitting
+        self.qkv = ColumnLinear(hidden_size,
+                                hidden_size *
+                                3 if not multi_query_mode else hidden_size +
+                                2 * tp_size * self.attention_head_size,
+                                bias=True,
+                                dtype=dtype,
+                                tp_group=tp_group,
+                                tp_size=tp_size,
+                                gather_output=False)
+        self.dense = RowLinear(hidden_size,
+                               hidden_size,
+                               bias=bias,
+                               dtype=dtype,
+                               tp_group=tp_group,
+                               tp_size=tp_size)
+
+    def forward(self,
+                hidden_states: RaggedTensor,
+                position_embedding,
+                past_key_value,
+                sequence_length,
+                past_key_value_length,
+                masked_tokens,
+                cache_indirection,
+                use_cache=False):
+
+        if not default_net().plugin_config.gpt_attention_plugin:
+            raise ValueError(
+                'Qwen is only supported with GPTAttention plugin')
+
+        assert isinstance(hidden_states, RaggedTensor)
+        input_lengths = hidden_states.row_lengths
+        max_input_length = hidden_states.max_row_length
+        hidden_states = hidden_states.data
+        qkv = self.qkv(hidden_states)
+
+        self.register_network_output('qkv_test', qkv)
+
+        # attention
+        query, key, value = split(qkv, hidden_states.size()[-1], dim=2)
+        
+        query = query.view(
+            concat([
+                shape(qkv, 0),
+                shape(qkv, 1), self.num_attention_heads,
+                self.attention_head_size
+            ]))
+        key = key.view(
+            concat([
+                shape(qkv, 0),
+                shape(qkv, 1), self.num_attention_heads,
+                self.attention_head_size
+            ]))
+        value = value.view(
+            concat([
+                shape(qkv, 0),
+                shape(qkv, 1), self.num_attention_heads,
+                self.attention_head_size
+            ]))
+        zero = constant(
+            np.ascontiguousarray(
+                np.zeros([1, 1, 1, 1],
+                         dtype=np.float16
+                         if self.dtype == trt.float16 else np.float32)))
+
+        def rotate(x64):
+            x32_part0, x32_part1 = x64.split(64, dim=-1)
+
+            x32_part1_negtive = zero - x32_part1
+
+            y64 = concat([x32_part1_negtive, x32_part0], dim=3)
+            return y64
+
+        def rotate_embedding(x, position_embedding_value):
+            cos0, sin0 = position_embedding_value
+            x128 = x
+            x64_part0, x64_part1 = x128.split((cos0.size()[-1], x128.size()[-1]-cos0.size()[-1]), dim=-1)
+
+            x64_part0_rotate = rotate(x64_part0)
+            y64_part0 = x64_part0 * cos0 + x64_part0_rotate * sin0
+
+            y128 = concat([y64_part0, x64_part1], dim=3)
+            y128 = y128.view(shape(x))
+            return y128
+
+        query = rotate_embedding(query, position_embedding)
+        key = rotate_embedding(key, position_embedding)
+
+        kv_orig_quant_scale = self.kv_orig_quant_scale.value if self.use_int8_kv_cache else None
+        kv_quant_orig_scale = self.kv_quant_orig_scale.value if self.use_int8_kv_cache else None
+
+        qkv = concat([query, key, value], dim=2)
+        qkv = qkv.view(
+            concat([shape(qkv, 0),
+                    shape(qkv, 1), self.hidden_size * 3]))
+        context, past_key_value = gpt_attention(
+            qkv,
+            past_key_value,
+            sequence_length,
+            past_key_value_length,
+            masked_tokens,
+            input_lengths,
+            max_input_length,
+            cache_indirection,
+            self.num_attention_heads,
+            self.attention_head_size,
+            self.q_scaling,
+            self.rotary_embedding_dim,
+            self.neox_rotary_style,
+            self.multi_block_mode,
+            self.multi_query_mode,
+            kv_orig_quant_scale,
+            kv_quant_orig_scale,
+            self.use_int8_kv_cache,
+            mask_type=self.attention_mask_type.value)
+
+        context = self.dense(context)
+
+        context = RaggedTensor.from_row_lengths(context, input_lengths,
+                                                max_input_length)
+        if use_cache:
+            return (context, past_key_value)
+        else:
+            return context
+
+
+class QwenDecoderLayer(Module):
+
+    def __init__(self,
+                 hidden_size,
+                 num_attention_heads,
+                 max_position_embeddings,
+                 num_layers,
+                 dtype=None,
+                 apply_query_key_layer_scaling=False,
+                 attention_mask_type=AttentionMaskType.bidirectional,
                  hidden_act='silu',
+                 position_embedding_type=PositionEmbeddingType.learned_absolute,
+                 quant_mode=QuantMode(0),
+                 rotary_embedding_percentage=1.0,
                  mlp_hidden_size=None,
-                 neox_rotary_style=True,
+                #  neox_rotary_style=True,
+                 bias=True,
                  multi_query_mode=False,
                  tp_group=None,
                  tp_size=1):
         super().__init__()
-        self._layer_id = layer_id  # useful for debugging
+
+        self.hidden_size = hidden_size
+        self.num_attention_heads = num_attention_heads
+        self.max_position_embeddings = max_position_embeddings
+        self.num_layers = num_layers
+        self.dtype = dtype
+        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
+        self.attention_mask_type = attention_mask_type
+        self.hidden_act = hidden_act
+        self.position_embedding_type = position_embedding_type
+        self.tp_group = tp_group
+        self.tp_size = tp_size
         self.input_layernorm = RmsNorm(normalized_shape=hidden_size,
                                        dtype=dtype)
 
-        self.attention = Attention(
+        self.attention = Qwenttention(
             hidden_size,
             num_attention_heads,
             max_position_embeddings,
+            num_layers,
+            apply_query_key_layer_scaling,
             dtype=dtype,
-            attention_mask_type=AttentionMaskType.causal,
-            bias=True,
-            position_embedding_type=PositionEmbeddingType.rope,
-            neox_rotary_style=neox_rotary_style,
-            multi_query_mode=multi_query_mode,
+            attention_mask_type=attention_mask_type,
+            position_embedding_type=position_embedding_type,
+            neox_rotary_style=True,
+            rotary_embedding_percentage=rotary_embedding_percentage,
+            bias=bias,
             tp_group=tp_group,
-            tp_size=tp_size)
+            tp_size=tp_size,
+            use_int8_kv_cache=quant_mode.has_int8_kv_cache())
         
         # set dense layer bias=False
         self.attention.dense = RowLinear(hidden_size,
@@ -67,7 +279,7 @@ class QwenDecoderLayer(Module):
 
     def forward(self,
                 hidden_states: RaggedTensor,
-                attention_mask=None,
+                position_embedding,
                 past_key_value=None,
                 sequence_length=None,
                 past_key_value_length=None,
@@ -79,10 +291,11 @@ class QwenDecoderLayer(Module):
         max_input_length = hidden_states.max_row_length
         hidden_states = self.input_layernorm(hidden_states.data)
 
+        self.register_network_output('input_layernorm_out', hidden_states)
         attention_output = self.attention(
             RaggedTensor.from_row_lengths(hidden_states, input_lengths,
                                           max_input_length),
-            attention_mask=attention_mask,
+            position_embedding=position_embedding,
             past_key_value=past_key_value,
             sequence_length=sequence_length,
             past_key_value_length=past_key_value_length,
@@ -118,28 +331,45 @@ class QwenModel(Module):
                  vocab_size,
                  hidden_act,
                  max_position_embeddings,
-                 dtype,
-                 mlp_hidden_size=None,
-                 neox_rotary_style=True,
+                 dtype=None,
                  tensor_parallel=1,
                  tensor_parallel_group=None,
+                 apply_query_key_layer_scaling=False,
+                 position_embedding_type=PositionEmbeddingType.learned_absolute,
+                 rotary_embedding_percentage=1.0,
+                 inter_size=None,
+                 bias=True,
+                 quant_mode=QuantMode(0),
                  multi_query_mode=False):
         super().__init__()
+
+        self.half_head_size = hidden_size // num_heads
         self.embedding = Embedding(vocab_size, hidden_size, dtype=dtype)
+        self.position_embedding_cos = Embedding(max_position_embeddings,
+                                                self.half_head_size,
+                                                dtype=dtype)
+        self.position_embedding_sin = Embedding(max_position_embeddings,
+                                                self.half_head_size,
+                                                dtype=dtype)
 
         self.layers = ModuleList([
-            QwenDecoderLayer(layer_id=i,
-                              hidden_size=hidden_size,
-                              num_attention_heads=num_heads,
-                              max_position_embeddings=max_position_embeddings,
-                              dtype=dtype,
-                              hidden_act=hidden_act,
-                              mlp_hidden_size=mlp_hidden_size,
-                              neox_rotary_style=neox_rotary_style,
-                              multi_query_mode=multi_query_mode,
-                              tp_group=tensor_parallel_group,
-                              tp_size=tensor_parallel)
-            for i in range(num_layers)
+            QwenDecoderLayer(
+                hidden_size=hidden_size,
+                num_attention_heads=num_heads,
+                max_position_embeddings=max_position_embeddings,
+                num_layers=num_layers,
+                dtype=dtype,
+                apply_query_key_layer_scaling=apply_query_key_layer_scaling,
+                attention_mask_type=AttentionMaskType.bidirectional,
+                hidden_act=hidden_act,
+                position_embedding_type=position_embedding_type,
+                rotary_embedding_percentage=rotary_embedding_percentage,
+                multi_query_mode=multi_query_mode,
+                tp_group=tensor_parallel_group,
+                tp_size=tensor_parallel,
+                mlp_hidden_size=inter_size,
+                bias=bias,
+                quant_mode=quant_mode) for _ in range(num_layers)
         ])
 
         self.ln_f = RmsNorm(normalized_shape=hidden_size, dtype=dtype)
@@ -152,10 +382,28 @@ class QwenModel(Module):
                 past_key_value_length=None,
                 masked_tokens=None,
                 use_cache=False,
-                attention_mask=None,
+                # attention_mask=None,
                 cache_indirection=None):
+        
+        batch_size = shape(input_ids.data, 0)
+        input_len = shape(input_ids.data, 1)
 
         hidden_states = self.embedding(input_ids.data)
+
+        position_embedding_cos = self.position_embedding_cos(position_ids)
+        position_embedding_sin = self.position_embedding_sin(position_ids)
+
+        position_embedding_cos = position_embedding_cos.view(
+            concat([batch_size, input_len, 1, self.half_head_size])
+        )
+
+        position_embedding_sin = position_embedding_sin.view(
+            concat([batch_size, input_len, 1, self.half_head_size])
+        )
+
+        position_embedding = [
+            position_embedding_cos, position_embedding_sin
+        ]
 
         if past_key_value is None:
             past_key_value = tuple([None] * len(self.layers))
@@ -163,22 +411,18 @@ class QwenModel(Module):
         if use_cache:
             presents = []
 
-        if attention_mask is not None:
-            attention_mask = expand_mask(attention_mask,
-                                         shape(input_ids.data, -1))
-
         hidden_states = RaggedTensor.from_row_lengths(hidden_states,
                                                       input_ids.row_lengths,
                                                       input_ids.max_row_length)
 
         for layer, past in zip(self.layers, past_key_value):
             hidden_states = layer(hidden_states,
+                                  position_embedding,
                                   past_key_value=past,
                                   sequence_length=sequence_length,
                                   past_key_value_length=past_key_value_length,
                                   masked_tokens=masked_tokens,
                                   use_cache=use_cache,
-                                  attention_mask=attention_mask,
                                   cache_indirection=cache_indirection)
 
             if use_cache:
@@ -202,26 +446,38 @@ class QwenForCausalLM(QwenModel):
                  hidden_act,
                  max_position_embeddings,
                  dtype,
+                 apply_query_key_layer_scaling=False,
+                 position_embedding_type=PositionEmbeddingType.learned_absolute,
+                 rotary_embedding_percentage=1.0,
                  mlp_hidden_size=None,
-                 neox_rotary_style=True,
+                #  neox_rotary_style=True,
                  tensor_parallel=1,
                  tensor_parallel_group=None,
+                 bias=True,
+                 quant_mode=QuantMode(0),
                  multi_query_mode=False):
         if isinstance(dtype, str):
-            self.kv_dtype = str_dtype_to_trt(dtype)
+            self._kv_dtype = str_dtype_to_trt(dtype)
         else:
             assert isinstance(dtype, trt.DataType)
-            self.kv_dtype = dtype
-        self.num_layers = num_layers
-        self.num_heads = num_heads
-        self.hidden_size = hidden_size
-        self.vocab_size = vocab_size
-        self.tensor_parallel = tensor_parallel
+            self._kv_dtype = dtype
+        self._dtype = self._kv_dtype
+        if quant_mode.has_int8_kv_cache():
+            self._kv_dtype = str_dtype_to_trt('int8')
+
+        self._num_layers = num_layers
+        self._num_heads = num_heads
+        self._hidden_size = hidden_size
+        self._vocab_size = vocab_size
+        self._tensor_parallel = tensor_parallel
         self._multi_query_mode = multi_query_mode
+
         super().__init__(num_layers, num_heads, hidden_size, vocab_size,
                          hidden_act, max_position_embeddings, dtype,
-                         mlp_hidden_size, neox_rotary_style, tensor_parallel,
-                         tensor_parallel_group, multi_query_mode)
+                         tensor_parallel, tensor_parallel_group,
+                         apply_query_key_layer_scaling, position_embedding_type,
+                         rotary_embedding_percentage, mlp_hidden_size, bias,
+                         quant_mode, multi_query_mode)
         vocab_size_padded = pad_vocab_size(vocab_size, tensor_parallel)
         self.lm_head = ColumnLinear(hidden_size,
                                     vocab_size_padded,
@@ -240,12 +496,12 @@ class QwenForCausalLM(QwenModel):
                 masked_tokens=None,
                 use_cache=False,
                 last_token_ids=None,
-                attention_mask=None,
+                # attention_mask=None,
                 cache_indirection=None):
         hidden_states = super().forward(input_ids, position_ids, past_key_value,
                                         sequence_length, past_key_value_length,
                                         masked_tokens, use_cache,
-                                        attention_mask, cache_indirection)
+                                        cache_indirection)
 
         if use_cache:
             hidden_states, presents = hidden_states
@@ -254,13 +510,14 @@ class QwenForCausalLM(QwenModel):
             hidden_states, last_token_ids,
             default_net().plugin_config.remove_input_padding)
 
+
         # [batch_size, hidden_size] -> [batch_size, vocab_size]
         lm_logits = self.lm_head(hidden_states)
-        lm_logits.mark_output('logits', self.kv_dtype)
+        lm_logits.mark_output('logits', self._dtype)
 
         if use_cache:
             for i, present in enumerate(presents):
-                present.mark_output(f'present_key_value_{i}', self.kv_dtype)
+                present.mark_output(f'present_key_value_{i}', self._kv_dtype)
             return (lm_logits, presents)
 
         return lm_logits
@@ -274,8 +531,8 @@ class QwenForCausalLM(QwenModel):
         '''
 
         # Prepare inputs
-        head_size = self.hidden_size // self.num_heads
-        num_heads = self.num_heads // self.tensor_parallel
+        head_size = self._hidden_size // self._num_heads
+        num_heads = self._num_heads // self._tensor_parallel
         num_heads_kv = 1 if self._multi_query_mode else num_heads
         max_len = max_input_len + max_new_tokens
         bb_range = [
@@ -286,7 +543,7 @@ class QwenForCausalLM(QwenModel):
         beam_width_range = [1, (max_beam_width + 1) // 2, max_beam_width]
         inlen_range = [1, 1, max_input_len]
         max_len_range = [0, (max_len + 1) // 2, max_len]
-        mask_len_range = [1, (max_len + 1) // 2 + 1, max_len + 1]
+        # mask_len_range = [1, (max_len + 1) // 2 + 1, max_len + 1]
         num_tokens_range = [
             1, max_batch_size * max_beam_width,
             max(max_input_len * max_batch_size, max_beam_width * max_batch_size)
@@ -296,7 +553,7 @@ class QwenForCausalLM(QwenModel):
         sequence_length = None
         past_key_value_length = None
         masked_tokens = None
-        attention_mask = None
+        
         use_gpt_attention_plugin = default_net(
         ).plugin_config.gpt_attention_plugin
         remove_input_padding = default_net().plugin_config.remove_input_padding
@@ -332,7 +589,7 @@ class QwenForCausalLM(QwenModel):
                                       ('input_len', [inlen_range]),
                                   ]))
 
-        for i in range(self.num_layers):
+        for i in range(self._num_layers):
             kv_dim_range = OrderedDict([
                 ('batch_size', [bb_range]),
                 ('kv', [2]),
@@ -341,7 +598,7 @@ class QwenForCausalLM(QwenModel):
                 ('head_size', [head_size]),
             ])
             kv = Tensor(name=f'past_key_value_{i}',
-                        dtype=self.kv_dtype,
+                        dtype=self._kv_dtype,
                         shape=[-1, 2, num_heads_kv, -1, head_size],
                         dim_range=kv_dim_range)
             past_key_value.append(kv)
@@ -349,35 +606,27 @@ class QwenForCausalLM(QwenModel):
             if not remove_input_padding:
                 assertion(shape(input_ids, 0) == shape(kv, 0), 'batch size')
 
-        if use_gpt_attention_plugin:
-            sequence_length = Tensor(
-                name='sequence_length',
-                dtype=trt.int32,
-                shape=[-1],
-                dim_range=OrderedDict([('batch_size', [bb_range])]),
-            )
-            past_key_value_length = Tensor(
-                name='past_key_value_length',
-                dtype=trt.int32,
-                shape=[-1],
-                dim_range=OrderedDict([('past_key_value_length',
-                                        [max_len_range])]),
-            )
-            masked_tokens = Tensor(name='masked_tokens',
-                                   dtype=trt.int32,
-                                   shape=[-1, -1],
-                                   dim_range=OrderedDict([
-                                       ('batch_size', [bb_range]),
-                                       ('max_seq_len', [max_len_range]),
-                                   ]))
-        else:
-            attention_mask = Tensor(name='attention_mask',
-                                    dtype=trt.int32,
-                                    shape=[-1, -1],
-                                    dim_range=OrderedDict([
-                                        ('batch_size', [bb_range]),
-                                        ('mask_len', [mask_len_range]),
-                                    ]))
+        # if use_gpt_attention_plugin:
+        sequence_length = Tensor(
+            name='sequence_length',
+            dtype=trt.int32,
+            shape=[-1],
+            dim_range=OrderedDict([('batch_size', [bb_range])]),
+        )
+        past_key_value_length = Tensor(
+            name='past_key_value_length',
+            dtype=trt.int32,
+            shape=[-1],
+            dim_range=OrderedDict([('past_key_value_length',
+                                    [max_len_range])]),
+        )
+        masked_tokens = Tensor(name='masked_tokens',
+                                dtype=trt.int32,
+                                shape=[-1, -1],
+                                dim_range=OrderedDict([
+                                    ('batch_size', [bb_range]),
+                                    ('max_seq_len', [max_len_range]),
+                                ]))
 
         input_lengths = Tensor(name='input_lengths',
                                dtype=trt.int32,
@@ -411,6 +660,6 @@ class QwenForCausalLM(QwenModel):
 
         return (input_ids_ragged, position_ids, past_key_value, sequence_length,
                 past_key_value_length, masked_tokens, True, last_token_ids,
-                attention_mask, cache_indirection)
+                cache_indirection)
 
 

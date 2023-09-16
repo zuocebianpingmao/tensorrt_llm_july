@@ -821,7 +821,8 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             logger.warn("Flash attention will be disabled because it does NOT support fp32.")
 
         if config.use_flash_attn:
-            _import_flash_attn()
+            # _import_flash_attn()
+            pass
 
         self.transformer = QWenModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
