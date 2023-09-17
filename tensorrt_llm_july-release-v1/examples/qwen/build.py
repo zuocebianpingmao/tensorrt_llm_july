@@ -181,7 +181,7 @@ def parse_arguments():
     if args.use_smooth_quant:
         args.quant_mode = QuantMode.use_smooth_quant(args.per_token,
                                                      args.per_channel)
-    if args.use_weight_only:
+    elif args.use_weight_only:
         args.quant_mode = QuantMode.use_weight_only(
             args.weight_only_precision == 'int4')
     else:
