@@ -191,9 +191,9 @@ self.position_embedding_sin = Embedding(max_position_embeddings,
 tensorrt_llm_qwen.position_embedding_cos.weight.value = (fromfile(
         dir_path, 'model.cosTable.weight.bin',
         [n_positions, kv_channel]))
-    tensorrt_llm_qwen.position_embedding_sin.weight.value = (fromfile(
-        dir_path, 'model.sinTable.weight.bin',
-        [n_positions, kv_channel]))
+tensorrt_llm_qwen.position_embedding_sin.weight.value = (fromfile(
+    dir_path, 'model.sinTable.weight.bin',
+    [n_positions, kv_channel]))
 ```
 QwenModel的forward函数中计算position_embedding
 ```
