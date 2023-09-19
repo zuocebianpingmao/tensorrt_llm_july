@@ -16,7 +16,7 @@ from ...parameter import Parameter
 from ...quantization import FP8MLP, FP8Linear, FP8RowLinear, QuantMode
 
 
-class Qwenttention(Module):
+class QwenAttention(Module):
 
     def __init__(self,
                  hidden_size,
@@ -242,7 +242,7 @@ class QwenDecoderLayer(Module):
         self.input_layernorm = RmsNorm(normalized_shape=hidden_size,
                                        dtype=dtype)
 
-        self.attention = Qwenttention(
+        self.attention = QwenAttention(
             hidden_size,
             num_attention_heads,
             max_position_embeddings,
