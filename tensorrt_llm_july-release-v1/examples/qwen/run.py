@@ -73,7 +73,7 @@ if __name__ == '__main__':
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         args.tokenizer_dir, trust_remote_code=True)
     
-    generation_config = GenerationConfig.from_pretrained("/root/Qwen-7b-Chat", trust_remote_code=True)
+    generation_config = GenerationConfig.from_pretrained(args.tokenizer_dir, trust_remote_code=True)
 
     assert generation_config.chat_format == 'chatml', _ERROR_BAD_CHAT_FORMAT
     history = []
