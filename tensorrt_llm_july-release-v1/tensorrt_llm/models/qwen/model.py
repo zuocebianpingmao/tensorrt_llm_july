@@ -116,8 +116,6 @@ class QwenAttention(Module):
         hidden_states = hidden_states.data
         qkv = self.qkv(hidden_states)
 
-        self.register_network_output('qkv_test', qkv)
-
         # attention
         query, key, value = split(qkv, hidden_states.size()[-1], dim=2)
         
@@ -291,7 +289,6 @@ class QwenDecoderLayer(Module):
         max_input_length = hidden_states.max_row_length
         hidden_states = self.input_layernorm(hidden_states.data)
 
-        self.register_network_output('input_layernorm_out', hidden_states)
         attention_output = self.attention(
             RaggedTensor.from_row_lengths(hidden_states, input_lengths,
                                           max_input_length),
