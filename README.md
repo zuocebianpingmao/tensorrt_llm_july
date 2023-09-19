@@ -275,7 +275,7 @@ key = rotate_embedding(key, position_embedding)
 TensorRT 9.0.0.2  
 CUDA 12.1  
 python 3.8.10  
-NVIDIA driver 525.105.17
+NVIDIA driver 525.105.17  
 GPU: A10，显存24GB
 ## 测试
 在完成了代码优化之后，重新生成engine文件并测试
