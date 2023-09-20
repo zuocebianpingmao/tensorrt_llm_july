@@ -162,7 +162,7 @@ def hf_qwen_converter(args: ProgArgs):
                                split="validation",
                                cache_dir=args.dataset_cache_dir)
         act_range = capture_activation_range(
-            model, AutoTokenizer.from_pretrained(args.in_file), dataset)
+            model, AutoTokenizer.from_pretrained(args.in_file, trust_remote_code=True), dataset)
         if args.smoothquant is not None:
             smooth_gpt_model(model, act_range, args.smoothquant)
 

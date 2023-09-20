@@ -119,7 +119,7 @@ def capture_activation_range(model,
 
         if act_scales[name]["w"] is None:
             act_scales[name]["w"] = m.weight.abs().clip(1e-8,
-                                                        None).max(dim=0)[0]
+                                                        None).max(dim=1)[0]
 
     hooks = []
     for name, m in model.named_modules():

@@ -159,8 +159,9 @@ rougeLsum : 10.177149178334947
 加速比约为2.49，rouge score与原始模型尚有一定的差距
 
 ## 优化
+### 完善模型细节
 通过上面的rouge score计算可以看出当前版本存在一定的精度损失。在对比了tensorrt-llm的Attention类和Qwen-7b-chat模型的QWenAttention类就能发现，Attention不能完全复原QwenAttention的计算过程，缺失了一些关键的细节，需要进行改写。改写后的类命名为QwenAttention，改写主要是增加了关于rotary position embedding的计算，除了对Attention类进行改写之外，hf_qwen_convert.py， weight.py也需要进行一些调整；
-### 添加position embedding weight
+#### 添加position embedding weight
 在hf_qwen_convert.py添加了关于position embedding的计算，并将其保存成.bin文件
 ```
 nMaxSL = 2048
@@ -176,7 +177,7 @@ np.sin(valueTable).astype(storage_type).tofile(saved_dir /
                                                 "model.sinTable.weight.bin")
 ```
 这部分计算可以参考tensorrt_llm_july-release-v1/examples/qwen/model_utils/modeling_qwen.py中的RotaryEmbedding
-### Attention类改写
+#### Attention类改写
 在QwenModel类的__init__中添加两个embedding层：position_embedding_cos，position_embedding_sin
 ```
 self.position_embedding_cos = Embedding(max_position_embeddings,
@@ -268,6 +269,59 @@ def rotate_embedding(x, position_embedding_value):
 query = rotate_embedding(query, position_embedding)
 key = rotate_embedding(key, position_embedding)
 ```
+### int8 kv cache
+为了提高模型性能，考虑启用int8 kv cache，主要用到convert.py中的generate_int8，write_int8和smoothquant.py中的capture_activation_range  
+需要修改以下内容：
+- convert.py中保存attention.query_key_value.weight这部分，val的形状需要修改
+```
+elif "attention.query_key_value.weight" in key:
+hidden_dim = val.shape[0] // 3
+local_dim = val.shape[-1]
+
+# val = val.reshape(3, hidden_dim, local_dim)
+val = val.reshape(hidden_dim, 3, local_dim)
+split_dim = -1
+split_vals = np.split(val, factor, axis=split_dim)
+save_split(split_vals, saved_dir, key, i, factor)
+if save_int8:
+    base_key = key.replace(".weight", "")
+    vals_i8 = generate_int8(val, act_range, is_qkv=True)
+    write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
+```
+- capture_activation_range中给act_scales[name]["w"]赋值的时候dim设置为1
+```
+def stat_input_hook(m, x, y, name):
+    if isinstance(x, tuple):
+        x = x[0]
+    stat_tensor(name, x, act_scales, "x")
+    stat_tensor(name, y, act_scales, "y")
+
+    # if act_scales[name]["w"] is None:
+    #     act_scales[name]["w"] = m.weight.abs().clip(1e-8,
+    #                                                 None).max(dim=0)[0]
+    if act_scales[name]["w"] is None:
+        act_scales[name]["w"] = m.weight.abs().clip(1e-8,
+                                                    None).max(dim=1)[0]
+```
+- 添加--calibrate-kv-cache，重新运行转换格式
+```
+python hf_qwen_convert.py -i /root/test/Qwen-7b-Chat \
+                          -o ./c-model/qwen-7b \
+                          --tensor-parallelism 1 \
+                          --storage-type float16 \
+                          --processes 1 \
+                          --calibrate-kv-cache
+```
+- 添加--int8_kv_cache，重新生成engine
+```
+python build.py --model_dir ./c-model/qwen-7b/1-gpu \
+                --dtype float16 \
+                --use_gpt_attention_plugin float16 \
+                --use_gemm_plugin float16 \
+                --output_dir trtModel \
+                --enable_context_fmha \
+                --int8_kv_cache
+```
 
 # 优化效果
 ## 运行环境：  
@@ -278,8 +332,7 @@ python 3.8.10
 NVIDIA driver 525.105.17  
 GPU: A10，显存24GB
 ## 测试
-在完成了代码优化之后，重新生成engine文件并测试
-- **TensorRT-LLM构建的Qwen-7b-chat：**  
+- **TensorRT-LLM构建的Qwen-7b-chat（未启用int8 kv cache等）：**  
 TensorRT-LLM (total latency: 31.374691486358643 sec)  
 TensorRT-LLM beam 0 result  
 rouge1 : 15.03897779266612  
@@ -294,10 +347,19 @@ rouge2 : 3.6904330608242164
 rougeL : 10.85424486688883  
 rougeLsum : 12.84889226768845  
 
+- **启用int8 kv cache的测试结果：**  
+TensorRT-LLM (total latency: 27.99358320236206 sec)  
+TensorRT-LLM beam 0 result  
+rouge1 : 14.030726068576666  
+rouge2 : 3.244306418219462  
+rougeL : 11.027431582093367  
+rougeLsum : 11.942382117033334
 - 性能  
-total latency从81.77836441993713 sec降低到31.374691486358643 sec，加速比约为2.6，相比初始版本优化模型的加速比2.49，略有提升。
+  - 在完成Attention类的修改之后，total latency从81.77836441993713 sec降低到31.374691486358643 sec，加速比约为2.6，相比初始版本优化模型的加速比2.49，略有提升。
+  - 启用int8 kv cache后提升了性能，total latency从未启用时的31.374691486358643 sec降低到27.99358320236206 sec；加速比从2.6提高到2.92
 - 精度  
-对比rouge score，优化模型与原始模型的差距均在1以内，相比初始版本的优化模型精度也有所提高
+  - 对比rouge score，完成Attention类的修改之后，优化模型与原始模型的差距均在1以内，相比初始版本的优化模型精度也有所提高
+  - 启用int8 kv cache后精度有所下降
 
 # 送分题答案
 

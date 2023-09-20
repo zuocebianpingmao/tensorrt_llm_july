@@ -461,6 +461,8 @@ class QwenForCausalLM(QwenModel):
         self._dtype = self._kv_dtype
         if quant_mode.has_int8_kv_cache():
             self._kv_dtype = str_dtype_to_trt('int8')
+        
+        self.quant_mode = quant_mode
 
         self._num_layers = num_layers
         self._num_heads = num_heads

@@ -130,19 +130,19 @@ def split_and_save_weight(i, saved_dir, factor, key, val, act_range):
         split_dim = 0
         split_vals = np.split(val, factor, axis=split_dim)
         save_split(split_vals, saved_dir, key, i, factor)
-        if save_int8:
-            base_key = key.replace(".weight", "")
-            vals_i8 = generate_int8(val, act_range)
-            write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
+        # if save_int8:
+        #     base_key = key.replace(".weight", "")
+        #     vals_i8 = generate_int8(val, act_range)
+        #     write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
 
     elif "mlp.dense_h_to_4h.weight" in key or "mlp.dense_h_to_4h.gate.weight" in key:
         split_dim = -1
         split_vals = np.split(val, factor, axis=split_dim)
         save_split(split_vals, saved_dir, key, i, factor)
-        if save_int8:
-            base_key = key.replace(".weight", "")
-            vals_i8 = generate_int8(val, act_range)
-            write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
+        # if save_int8:
+        #     base_key = key.replace(".weight", "")
+        #     vals_i8 = generate_int8(val, act_range)
+        #     write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
 
     elif "attention.query_key_value.bias" in key:
         local_dim = val.shape[-1] // 3
@@ -155,7 +155,8 @@ def split_and_save_weight(i, saved_dir, factor, key, val, act_range):
         hidden_dim = val.shape[0] // 3
         local_dim = val.shape[-1]
 
-        val = val.reshape(3, hidden_dim, local_dim)
+        # val = val.reshape(3, hidden_dim, local_dim)
+        val = val.reshape(hidden_dim, 3, local_dim)
         split_dim = -1
         split_vals = np.split(val, factor, axis=split_dim)
         save_split(split_vals, saved_dir, key, i, factor)
