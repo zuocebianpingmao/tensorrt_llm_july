@@ -278,15 +278,15 @@ elif "attention.query_key_value.weight" in key:
     hidden_dim = val.shape[0] // 3
     local_dim = val.shape[-1]
 
-# val = val.reshape(3, hidden_dim, local_dim)
-val = val.reshape(hidden_dim, 3, local_dim)
-split_dim = -1
-split_vals = np.split(val, factor, axis=split_dim)
-save_split(split_vals, saved_dir, key, i, factor)
-if save_int8:
-    base_key = key.replace(".weight", "")
-    vals_i8 = generate_int8(val, act_range, is_qkv=True)
-    write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
+    # val = val.reshape(3, hidden_dim, local_dim)
+    val = val.reshape(hidden_dim, 3, local_dim)
+    split_dim = -1
+    split_vals = np.split(val, factor, axis=split_dim)
+    save_split(split_vals, saved_dir, key, i, factor)
+    if save_int8:
+        base_key = key.replace(".weight", "")
+        vals_i8 = generate_int8(val, act_range, is_qkv=True)
+        write_int8(vals_i8, saved_dir, base_key, split_dim, i, factor)
 ```
 - capture_activation_range中给act_scales[name]["w"]赋值的时候dim设置为1
 ```
