@@ -275,8 +275,8 @@ key = rotate_embedding(key, position_embedding)
 - convert.py中保存attention.query_key_value.weight这部分，val的形状需要修改
 ```
 elif "attention.query_key_value.weight" in key:
-hidden_dim = val.shape[0] // 3
-local_dim = val.shape[-1]
+    hidden_dim = val.shape[0] // 3
+    local_dim = val.shape[-1]
 
 # val = val.reshape(3, hidden_dim, local_dim)
 val = val.reshape(hidden_dim, 3, local_dim)
