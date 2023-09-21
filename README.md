@@ -361,6 +361,10 @@ rougeLsum : 11.942382117033334
   - 对比rouge score，完成Attention类的修改之后，优化模型与原始模型的差距均在1以内，相比初始版本的优化模型精度也有所提高
   - 启用int8 kv cache后精度有所下降
 
+# Bug报告
+
+经过测试观察到[starcoder-7b性能问题](https://github.com/NVIDIA/trt-samples-for-hackathon-cn/issues/98)；直接使用pytorch进行推理，与将模型转化为TensorRT-LLM后进行推理，性能无明显差异
+
 # 送分题答案
 
 - python3 run.py --max_output_len=8，输出：chef and eventually became a chef at a
